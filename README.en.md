@@ -1,9 +1,5 @@
 # ZCode-CE
 
-Experimental Windows 7 SP1 x64 desktop build: `pnpm bundle:desktop:win7`.
-Uses a pinned third-party Electron runtime; Windows 7 hardware validation is pending.
-See [build instructions and acceptance criteria](docs/development/windows7-desktop.md).
-
 <div align="center">
   <img src="public/logo/icons/1024x1024.png" alt="ZCode-CE" width="128" height="128" />
 </div>
@@ -73,11 +69,11 @@ For every capability this build does not provide, and why, see [Differences from
 
 Download the installer for your platform from [Releases](https://github.com/Zcode-CE/Zcode-CE/releases).
 
-| Platform    | Format                                         | Notes                                                                                                                                                                                                                                                                                                                                                                    |
-| ----------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Windows** | `.exe` (NSIS)                                  | Run the installer. Currently **unsigned**, so the first launch requires choosing "Run anyway" in the SmartScreen prompt                                                                                                                                                                                                                                                  |
-| **Linux**   | `.AppImage` / `.deb` / `.rpm` / `.pkg.tar.zst` | AppImage needs `chmod +x` before running                                                                                                                                                                                                                                                                                                                                 |
-| **macOS**   | `.dmg` / `.zip`                                | One build each for darwin-x64 and darwin-arm64, produced by CI per release (actually shipping since 3.15.1-ce.1 — see [Releases](https://github.com/Zcode-CE/Zcode-CE/releases)). **Ad-hoc signed, not notarized**: the first launch needs a Gatekeeper allowance — right-click the app and choose "Open", or run `xattr -dr com.apple.quarantine /path/to/ZCode-CE.app` |
+| Platform    | Format                                         | Notes                                                                                                                                                                                                                                                              |
+| ----------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Windows** | `.exe` (NSIS)                                  | Run the installer. Currently **unsigned**, so the first launch requires choosing "Run anyway" in the SmartScreen prompt                                                                                                                                            |
+| **Linux**   | `.AppImage` / `.deb` / `.rpm` / `.pkg.tar.zst` | AppImage needs `chmod +x` before running                                                                                                                                                                                                                           |
+| **macOS**   | `.dmg` / `.zip`                                | One build each for darwin-x64 and darwin-arm64, produced by CI per release. **Ad-hoc signed, not notarized**: the first launch needs a Gatekeeper allowance — right-click the app and choose "Open", or run `xattr -dr com.apple.quarantine /path/to/ZCode-CE.app` |
 
 **Data directory**: shared with the official ZCode at `~/.zcode/v2`. Both can be installed side by side (separate install identities), but running them simultaneously is not recommended.
 

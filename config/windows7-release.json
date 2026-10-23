@@ -1,8 +1,0 @@
-{
-  "upstreamRepository": "Zcode-CE/Zcode-CE",
-  "minimumPublishedAt": "2026-10-14T04:22:48Z",
-  "initialReleaseTag": "v3.15.1-ce.1",
-  "patchBaseCommit": "7fc3bfe252e7fb1833dc06113e3c2c012910996d",
-  "patchSourceCommit": "88662c02ea4578db143904ed0ca1cbc21316f495",
-  "patchFile": "patches/windows7-desktop.patch"
-}

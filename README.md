@@ -67,17 +67,13 @@ ZCode-CE 基于 [zai-org/ZCode](https://github.com/zai-org/ZCode)（Apache-2.0�
 
 ### 桌面应用
 
-Windows 7 SP1 x64 的本机桌面**实验构建入口**：`pnpm bundle:desktop:win7`。
-使用固定校验和的第三方 Electron 运行时，尚未完成 Win7 真机验收；构建与验收边界见
-[Windows 7 桌面移植](docs/development/windows7-desktop.md)。
-
 从 [Releases](https://github.com/Zcode-CE/Zcode-CE/releases) 下载对应平台的安装包。
 
-| 平台        | 格式                                           | 说明                                                                                                                                                                                                                                                                                 |
-| ----------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Windows** | `.exe`（NSIS）                                 | 直接运行安装。当前**未签名**，首次运行需在 SmartScreen 提示中选择「仍要运行」                                                                                                                                                                                                        |
-| **Linux**   | `.AppImage` / `.deb` / `.rpm` / `.pkg.tar.zst` | AppImage 需先 `chmod +x` 再运行                                                                                                                                                                                                                                                      |
-| **macOS**   | `.dmg` / `.zip`                                | darwin-x64 与 darwin-arm64 各一份，CI 随版产出（自 3.15.1-ce.1 起实际交付，见 [Releases](https://github.com/Zcode-CE/Zcode-CE/releases)）。**ad-hoc 签名、未公证**：首次打开需允许 Gatekeeper——右键点击应用选「打开」，或执行 `xattr -dr com.apple.quarantine /path/to/ZCode-CE.app` |
+| 平台        | 格式                                           | 说明                                                                                                                                                                                      |
+| ----------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Windows** | `.exe`（NSIS）                                 | 直接运行安装。当前**未签名**，首次运行需在 SmartScreen 提示中选择「仍要运行」                                                                                                             |
+| **Linux**   | `.AppImage` / `.deb` / `.rpm` / `.pkg.tar.zst` | AppImage 需先 `chmod +x` 再运行                                                                                                                                                           |
+| **macOS**   | `.dmg` / `.zip`                                | darwin-x64 与 darwin-arm64 各一份，CI 随版产出。**ad-hoc 签名、未公证**：首次打开需允许 Gatekeeper——右键点击应用选「打开」，或执行 `xattr -dr com.apple.quarantine /path/to/ZCode-CE.app` |
 
 **数据目录**：与官方 ZCode 共享 `~/.zcode/v2`，两者**可并存安装**（安装身份独立），但**不建议同时运行**。
 

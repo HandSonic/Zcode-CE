@@ -16,6 +16,6 @@ pkgbase = zcode-ce-bin
 	depends = xdg-utils
 	options = !strip
 	source = zcode-ce-bin-3.15.1.ce.1.pkg.tar.zst::https://github.com/Zcode-CE/Zcode-CE/releases/download/v3.15.1-ce.1/ZCode-CE-3.15.1-ce.1-linux-x64.pkg.tar.zst
-	sha256sums = df31797caa9baa3319a5db293b75c243c332f37005db2a0ec76ed957739ea5ae
+	sha256sums = 53f429ae2fa747d2f307b0bfa00b4c2d5e139d3f8f9c42c1bae3998559384e8f
 
 pkgname = zcode-ce-bin
