@@ -14,6 +14,7 @@ import {
 import { registerMemoryDiagnosticsProvider } from "#src/memoryDiagnostics.js";
 import { createServiceLogger } from "#src/logger/serviceLogger.js";
 import { assertLocalTerminalNativeSupported, type LocalLibcSnapshot } from "./localLibcSupport.js";
+import { resolveWindowsPtyPolicy } from "./windowsPtyPolicy.js";
 
 const require = createRequire(import.meta.url);
 type NodePtyModule = typeof import("node-pty");
@@ -48,23 +49,13 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function parseWindowsBuildNumber(releaseText: string): number | undefined {
-  const buildText = releaseText.split(".")[2];
-  if (!buildText) return undefined;
-  const buildNumber = Number.parseInt(buildText, 10);
-  return Number.isFinite(buildNumber) ? buildNumber : undefined;
-}
-
 function resolveTerminalWindowsPtyInfo(
   platform: NodeJS.Platform = process.platform,
   releaseText: string = release(),
 ): TerminalWindowsPtyInfo | undefined {
   if (platform !== "win32") return undefined;
 
-  return {
-    backend: "conpty",
-    buildNumber: parseWindowsBuildNumber(releaseText),
-  };
+  return resolveWindowsPtyPolicy(releaseText);
 }
 
 function isExecutable(command: string): boolean {
@@ -256,7 +247,7 @@ function spawnTerminalProcess(params: {
   }
 
   const windowsBaseOptions = {
-    useConpty: true,
+    useConpty: resolveWindowsPtyPolicy(release()).backend === "conpty",
     name: "xterm-256color",
     cols,
     rows,
@@ -264,6 +255,11 @@ function spawnTerminalProcess(params: {
     env,
     encoding: "utf8",
   } satisfies PtySpawnOptions;
+
+  // Win7 不提供 ConPTY API；必须直接走 node-pty 自带的 WinPTY，不能先启动再重试。
+  if (!windowsBaseOptions.useConpty) {
+    return nodePty.spawn(shell, [], windowsBaseOptions);
+  }
 
   try {
     return nodePty.spawn(shell, [], {

@@ -1,0 +1,37 @@
+name: Windows 7 experimental desktop
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/win7-desktop]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build Win7 experimental installer
+        run: pnpm bundle:desktop:win7
+        env:
+          ZCODE_ENV: production
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+      - name: Verify packaged SQLite and WinPTY on build host
+        shell: pwsh
+        run: |
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          & './packages/desktop/dist-win7/win-unpacked/ZCode-CE.exe' "$PWD/scripts/smoke-win7-desktop.cjs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZCode-CE-win7-x64-experimental
+          path: packages/desktop/dist-win7/*-win7.exe
+          if-no-files-found: error
+          retention-days: 14

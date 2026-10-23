@@ -17,6 +17,12 @@ import {
 import { cleanupPackagedSourcemaps } from "./scripts/packaged-sourcemap-cleanup.mjs";
 import { getTargetPlatform } from "./scripts/target-platform.mjs";
 import {
+  isWindows7Build,
+  resolveWindows7BuilderOptions,
+  WINDOWS7_RUNTIME,
+  assertWindows7WinptyPayload,
+} from "./scripts/windows7-runtime.mjs";
+import {
   resolveDesktopArtifactSuffix,
   resolveDesktopProductIdentity,
 } from "./scripts/desktop-product-identity.mjs";
@@ -71,6 +77,8 @@ import {
 
 const buildMetadata = getBuildMetadata();
 const targetPlatform = getTargetPlatform();
+const windows7Build = isWindows7Build();
+const windows7BuilderOptions = await resolveWindows7BuilderOptions({ target: targetPlatform });
 const builtinProviderConfig = await loadBuiltinProviderConfig();
 const desktopProductIdentity = resolveDesktopProductIdentity({
   ...process.env,
@@ -233,7 +241,7 @@ const PACKAGING_PRUNE_PATTERNS = [
 
 function buildDesktopArtifactName(platformName, extension = "${ext}") {
   // 测试环境产物必须和正式安装包文件名区分，避免上传、下载或人工验收时混用。
-  return `\${productName}-\${version}-${platformName}-\${arch}${desktopArtifactEnvSuffix}.${extension}`;
+  return `\${productName}-\${version}-${platformName}-\${arch}${windows7Build ? "-win7" : ""}${desktopArtifactEnvSuffix}.${extension}`;
 }
 
 function runAsarCommand(args) {
@@ -500,6 +508,7 @@ export default {
   extraMetadata: {
     version: buildMetadata.appVersion,
     zcodeProductFlavor: desktopProductIdentity.flavor,
+    zcodeWindows7: windows7Build,
     homepage: "https://zcode.z.ai",
     author: {
       name: "ZCode",
@@ -513,7 +522,8 @@ export default {
   // pnpm workspace + semver range（如 ^41.0.3）下，electron-builder
   // 有时无法从依赖树里稳定推导出 Electron 版本，导致 bundle 直接中断。
   // 显式写死当前桌面端使用的 Electron 版本，避免打包阶段再做不可靠的猜测。
-  electronVersion: "41.0.3",
+  electronVersion: desktopElectronVersion,
+  ...windows7BuilderOptions,
   electronDownload: {
     // ELECTRON_MIRROR 是 @electron/get 的全局环境变量，会覆盖 dmg-builder 等
     // generic artifact 自己传入的 mirrorOptions，导致 builder 辅助包被错误拼到 Electron runtime 镜像目录。
@@ -581,8 +591,15 @@ export default {
         ? resolve(context.appOutDir, framework.distMacOsAppName, "Contents", "Resources")
         : resolve(context.appOutDir, "resources");
     await stageElectronNotices(context.appOutDir, resources, framework.version);
+    if (windows7Build) {
+      await writeFile(
+        resolve(resources, "WIN7-RUNTIME.json"),
+        JSON.stringify(WINDOWS7_RUNTIME, null, 2),
+      );
+    }
   },
   afterPack: async (context) => {
+    if (windows7Build) await assertWindows7WinptyPayload(resolvePackagedResourcesDir(context));
     const actualWindowsTarget =
       context.electronPlatformName === "win32"
         ? resolveElectronBuilderWindowsTarget({
@@ -634,8 +651,15 @@ export default {
     {
       // node-pty 的**原生件**：bundle 里 node-pty 的 JS 被内联，它按自身 __dirname 找
       // `build/Release/pty.node` ⇒ 必须与 .cjs 同级同构地放在 web-service/ 下。
-      from: resolve(workspaceRoot, "node_modules/node-pty/build/Release/pty.node"),
-      to: "web-service/build/Release/pty.node",
+      // Win7 使用目标 prebuild，不能取构建机编译的原生件；WinPTY 还要同目录 DLL/agent。
+      from: resolve(
+        workspaceRoot,
+        windows7Build
+          ? "node_modules/node-pty/prebuilds/win32-x64"
+          : "node_modules/node-pty/build/Release/pty.node",
+      ),
+      to: windows7Build ? "web-service/build/Release" : "web-service/build/Release/pty.node",
+      ...(windows7Build ? { filter: ["pty.node", "winpty.dll", "winpty-agent.exe"] } : {}),
     },
     {
       // web 静态资源：**排除 sourcemap**（`**/*.map`，实测占 packages/web/dist 的 55%）。
@@ -839,21 +863,23 @@ export default {
     installerHeaderIcon: "build/icon_installer.ico",
   },
   detectUpdateChannel: false,
-  publish: {
-    // 更新渠道指向本项目的 GitHub Release。electron-builder 会把这份配置写进安装包的
-    // app-update.yml（provider/owner/repo），electron-updater 运行时直接读它构造 GitHubProvider，
-    // 因此不需要自建 manifest 服务；客户端侧的分支逻辑见 packages/desktop/src/main/autoUpdater.ts。
-    provider: "github",
-    owner: "Zcode-CE",
-    repo: "Zcode-CE",
-    // 注意：这里不能保留 generic 专有的 useMultipleRangeRequest。GithubOptions 在
-    // electron-builder 的 schema 里是 additionalProperties:false，带上该字段会直接校验失败；
-    // 而 GitHub provider 的差分下载本来就固定走单 Range（electron-updater 内部因 GitHub 走 S3
-    // 强制 isUseMultipleRangeRequest=false），所以去掉它不会让 Windows 更新退化成全量包。
-    //
-    // electron-builder 默认把 GitHub Release 建成 draft，而 draft 对 electron-updater 完全不可见
-    // （releases.atom 与 /releases/latest 都不返回），会让更新链路静默失效。这里显式发布正式
-    // Release；需要临时改回 draft / prerelease 时用 EP_DRAFT / EP_PRE_RELEASE 环境变量覆盖。
-    releaseType: "release",
-  },
+  publish: windows7Build
+    ? null
+    : {
+        // 更新渠道指向本项目的 GitHub Release。electron-builder 会把这份配置写进安装包的
+        // app-update.yml（provider/owner/repo），electron-updater 运行时直接读它构造 GitHubProvider，
+        // 因此不需要自建 manifest 服务；客户端侧的分支逻辑见 packages/desktop/src/main/autoUpdater.ts。
+        provider: "github",
+        owner: "Zcode-CE",
+        repo: "Zcode-CE",
+        // 注意：这里不能保留 generic 专有的 useMultipleRangeRequest。GithubOptions 在
+        // electron-builder 的 schema 里是 additionalProperties:false，带上该字段会直接校验失败；
+        // 而 GitHub provider 的差分下载本来就固定走单 Range（electron-updater 内部因 GitHub 走 S3
+        // 强制 isUseMultipleRangeRequest=false），所以去掉它不会让 Windows 更新退化成全量包。
+        //
+        // electron-builder 默认把 GitHub Release 建成 draft，而 draft 对 electron-updater 完全不可见
+        // （releases.atom 与 /releases/latest 都不返回），会让更新链路静默失效。这里显式发布正式
+        // Release；需要临时改回 draft / prerelease 时用 EP_DRAFT / EP_PRE_RELEASE 环境变量覆盖。
+        releaseType: "release",
+      },
 };

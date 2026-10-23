@@ -32,6 +32,7 @@
     "licenses:check": "node scripts/licenses.mjs check",
     "licenses:freshness": "node scripts/check-licenses-freshness.mjs",
     "bundle:desktop": "pnpm --filter @zcode/desktop run bundle --",
+    "bundle:desktop:win7": "node scripts/bundle-desktop-win7.mjs",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "knip": "knip",

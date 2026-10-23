@@ -96,6 +96,7 @@ const desktopTsupBundleSecurityOptions = resolveDesktopTsupBundleSecurityOptions
 
 function createSharedDefines() {
   return {
+    "process.env.ZCODE_WINDOWS7": JSON.stringify(process.env.ZCODE_WINDOWS7 === "1" ? "1" : "0"),
     __ZCODE_VERSION__: JSON.stringify(buildMetadata.appVersion),
     __ZCODE_COMMIT__: JSON.stringify(buildMetadata.buildCommitId),
     __ZCODE_BUILD_TIME__: JSON.stringify(buildMetadata.buildTime),
