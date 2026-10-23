@@ -331,6 +331,234 @@ index 0000000..ed9e570
 +    await rm(root, { recursive: true, force: true });
 +  }
 +});
+diff --git a/packages/desktop/test/windows7Smoke.test.mjs b/packages/desktop/test/windows7Smoke.test.mjs
+new file mode 100644
+index 0000000..3881eed
+--- /dev/null
++++ b/packages/desktop/test/windows7Smoke.test.mjs
+@@ -0,0 +1,222 @@
++import assert from "node:assert/strict";
++import { mkdtemp, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fileURLToPath } from "node:url";
++import test from "node:test";
++import { runWin7Smoke } from "../../../scripts/run-win7-smoke.mjs";
++import {
++  SMOKE_PREFIX,
++  SMOKE_CHECKS,
++  assertWinptyOutput,
++  parseSmokeResult,
++} from "../../../scripts/win7-smoke-contract.cjs";
++
++const report = {
++  ok: true,
++  windows: "10.0.26100",
++  versions: { electron: "44.2.0" },
++  checks: [...SMOKE_CHECKS],
++};
++const reportLine = (value = report) => `${SMOKE_PREFIX}${JSON.stringify(value)}`;
++const contractPath = fileURLToPath(
++  new URL("../../../scripts/win7-smoke-contract.cjs", import.meta.url),
++);
++
++async function fakeExecutableScript(t, source) {
++  const directory = await mkdtemp(join(tmpdir(), "win7-smoke-gate-"));
++  t.after(() => rm(directory, { recursive: true, force: true }));
++  const scriptPath = join(directory, "fake-smoke.cjs");
++  await writeFile(scriptPath, source);
++  return { executable: process.execPath, scriptPath };
++}
++
++const printReport = (value = report) => `console.log(${JSON.stringify(reportLine(value))});`;
++
++async function fakeSmokeProcess(t, source) {
++  return fakeExecutableScript(
++    t,
++    `const { finishSmokeProcess } = require(${JSON.stringify(contractPath)});\n` +
++      `setInterval(() => {}, 1000);\n${source}`,
++  );
++}
++
++test("WinPTY 真实 ANSI 输出能识别结果，回显命令和部分匹配不能冒充执行成功", () => {
++  const output =
++    "\x1b]0;Administrator:  \x07\x1b[0mMicrosoft Windows [Version 10.0.26100.33650]\x1b[0K\r\n" +
++    "C:\\temp>echo ZCODE_WIN7_PTY_%ZCODE_SMOKE%\x1b[0K\r\n" +
++    "ZCODE_WIN7_PTY_OK\x1b[0K\r\n" +
++    "\x1b[0K\x1b[?25h";
++  assertWinptyOutput(output);
++  for (const invalid of [
++    "C:\\temp>echo ZCODE_WIN7_PTY_OK\x1b[0K\r\n",
++    "echo ZCODE_WIN7_PTY_OK\r\n",
++    "ZCODE_WIN7_PTY_OK_SUFFIX\r\n",
++    "PREFIX_ZCODE_WIN7_PTY_OK\r\n",
++    "ZCODE_WIN7_PTY_%ZCODE_SMOKE%\r\n",
++  ]) {
++    assert.throws(() => assertWinptyOutput(invalid), /independent successful command result/);
++  }
++});
++
++test("结构化报告必须包含正确运行时、Windows 版本和全部检查项", () => {
++  assert.deepEqual(parseSmokeResult(`${reportLine()}\n`), report);
++  for (const invalid of [
++    { ...report, ok: false },
++    { ...report, windows: "unknown" },
++    { ...report, versions: { electron: "41.0.0" } },
++    { ...report, checks: SMOKE_CHECKS.slice(0, -1) },
++  ])
++    assert.throws(() => parseSmokeResult(reportLine(invalid)));
++});
++
++test("子进程输出断言错误但退出 0，也必须阻止通过", async (t) => {
++  const options = await fakeExecutableScript(
++    t,
++    'console.error("AssertionError: terminal failed");',
++  );
++  await assert.rejects(runWin7Smoke(options), (error) => {
++    assert.match(error.message, /exactly one Win7 smoke success report/);
++    assert.match(error.stderr, /AssertionError: terminal failed/);
++    return true;
++  });
++});
++
++test("缺失、部分、畸形或重复的子进程报告均不能通过", async (t) => {
++  const cases = [
++    ["missing", 'console.log("finished");', /exactly one/],
++    ["partial", printReport({ ok: true }), /valid Windows version/],
++    [
++      "invalid-json",
++      `console.log(${JSON.stringify(`${SMOKE_PREFIX}{not json}`)});`,
++      /JSON|property name/,
++    ],
++    ["duplicate", `${printReport()}\n${printReport()}`, /exactly one/],
++  ];
++  for (const [name, source, pattern] of cases) {
++    await t.test(name, async (t) => {
++      const options = await fakeExecutableScript(t, source);
++      await assert.rejects(runWin7Smoke(options), pattern);
++    });
++  }
++});
++
++test("即使打印完整成功报告，非零退出仍阻止通过", async (t) => {
++  const options = await fakeExecutableScript(t, `${printReport()}\nprocess.exitCode = 7;`);
++  await assert.rejects(runWin7Smoke(options), (error) => {
++    assert.match(error.message, /process failed/);
++    assert.equal(error.cause.code, 7);
++    assert.match(error.stdout, /ZCODE_WIN7_SMOKE_RESULT=/);
++    return true;
++  });
++});
++
++test("打印成功报告后一直不退出的进程仍须超时失败", async (t) => {
++  const options = await fakeExecutableScript(t, `${printReport()}\nsetInterval(() => {}, 1000);`);
++  await assert.rejects(runWin7Smoke({ ...options, timeout: 1_000 }), (error) => {
++    assert.match(error.message, /timed out after 1000 ms/);
++    assert.match(error.stdout, /ZCODE_WIN7_SMOKE_RESULT=/);
++    return true;
++  });
++});
++
++test("等待正常退出并收到完整报告后才成功，保留 stdout/stderr 便于诊断", async (t) => {
++  const options = await fakeExecutableScript(
++    t,
++    `console.log("starting smoke");\nconsole.error("fixture diagnostic");\n${printReport()}`,
++  );
++  const result = await runWin7Smoke(options);
++  assert.deepEqual(result.report, report);
++  assert.match(result.stdout, /starting smoke/);
++  assert.match(result.stderr, /fixture diagnostic/);
++});
++
++test("require-win7 验证子进程收到参数，并拒绝现代 Windows 成功报告", async (t) => {
++  const modern = await fakeExecutableScript(t, printReport());
++  await assert.rejects(runWin7Smoke({ ...modern, requireWin7: true }), /Windows 7/);
++  const legacyReport = { ...report, windows: "6.1.7601" };
++  const legacy = await fakeExecutableScript(
++    t,
++    `require("node:assert/strict").ok(process.argv.includes("--require-win7"));\n${printReport(legacyReport)}`,
++  );
++  const result = await runWin7Smoke({ ...legacy, requireWin7: true });
++  assert.deepEqual(result.report, legacyReport);
++});
++
++test("独立 smoke 等待异步清理后写完报告并退出，不受常驻句柄影响", async (t) => {
++  const options = await fakeSmokeProcess(
++    t,
++    `finishSmokeProcess(async () => {
++      try { return ${JSON.stringify(report)}; }
++      finally {
++        await new Promise(resolve => setTimeout(resolve, 20));
++        process.stderr.write("cleanup completed\\n");
++      }
++    });`,
++  );
++  const result = await runWin7Smoke({ ...options, timeout: 5_000 });
++  assert.deepEqual(result.report, report);
++  assert.equal(result.stdout, `${reportLine()}\n`);
++  assert.match(result.stderr, /cleanup completed/);
++});
++
++test("独立 smoke 的检查或异步清理抛错时非零退出且不输出成功报告", async (t) => {
++  const cases = [
++    ["check", '() => { throw new Error("fixture check failed"); }', /fixture check failed/],
++    [
++      "cleanup",
++      `async () => {
++        try { return ${JSON.stringify(report)}; }
++        finally {
++          await new Promise(resolve => setTimeout(resolve, 20));
++          throw new Error("fixture cleanup failed");
++        }
++      }`,
++      /fixture cleanup failed/,
++    ],
++  ];
++  for (const [name, run, pattern] of cases) {
++    await t.test(name, async (t) => {
++      const options = await fakeSmokeProcess(t, `finishSmokeProcess(${run});`);
++      await assert.rejects(runWin7Smoke({ ...options, timeout: 5_000 }), (error) => {
++        assert.equal(error.cause.code, 1);
++        assert.match(error.stderr, pattern);
++        assert.match(error.stderr, /\n\s+at /);
++        assert.equal(error.stdout.includes(SMOKE_PREFIX), false);
++        return true;
++      });
++    });
++  }
++});
++
++test("独立 smoke 未完成时不得提前输出成功报告", async (t) => {
++  const options = await fakeSmokeProcess(t, "finishSmokeProcess(() => new Promise(() => {}));");
++  await assert.rejects(runWin7Smoke({ ...options, timeout: 1_000 }), (error) => {
++    assert.match(error.message, /timed out/);
++    assert.equal(error.stdout.includes(SMOKE_PREFIX), false);
++    return true;
++  });
++});
++
++test("独立 smoke 的 stdout 或 stderr 写入回调失败也必须非零退出", async (t) => {
++  for (const stream of ["stdout", "stderr"]) {
++    await t.test(stream, async (t) => {
++      const run =
++        stream === "stdout"
++          ? `() => (${JSON.stringify(report)})`
++          : '() => { throw new Error("fixture failure"); }';
++      const options = await fakeSmokeProcess(
++        t,
++        `process.${stream}.write = (_output, callback) => {
++          setImmediate(() => callback(new Error("fixture write failed")));
++        };
++        finishSmokeProcess(${run});`,
++      );
++      await assert.rejects(runWin7Smoke({ ...options, timeout: 5_000 }), (error) => {
++        assert.equal(error.cause.code, 1);
++        assert.equal(error.stdout.includes(SMOKE_PREFIX), false);
++        return true;
++      });
++    });
++  }
++});
 diff --git a/packages/desktop/tsup.config.ts b/packages/desktop/tsup.config.ts
 index 98c2bcd..82e1710 100644
 --- a/packages/desktop/tsup.config.ts
@@ -558,28 +786,120 @@ index 0000000..d364586
 +}
 +
 +if (process.argv[1] === fileURLToPath(import.meta.url)) await main();
+diff --git a/scripts/run-win7-smoke.mjs b/scripts/run-win7-smoke.mjs
+new file mode 100644
+index 0000000..442c701
+--- /dev/null
++++ b/scripts/run-win7-smoke.mjs
+@@ -0,0 +1,76 @@
++import assert from "node:assert/strict";
++import { execFile } from "node:child_process";
++import { resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++import { promisify } from "node:util";
++import { SMOKE_PREFIX, parseSmokeResult } from "./win7-smoke-contract.cjs";
++
++const exec = promisify(execFile);
++const defaultScript = fileURLToPath(new URL("./smoke-win7-desktop.cjs", import.meta.url));
++
++export async function runWin7Smoke({
++  executable,
++  scriptPath = defaultScript,
++  requireWin7 = false,
++  timeout = 60_000,
++}) {
++  assert.ok(typeof executable === "string" && executable.length > 0, "Missing packaged executable");
++  assert.ok(Number.isSafeInteger(timeout) && timeout > 0, "Smoke timeout must be positive");
++  let result;
++  try {
++    // Node 等待真实子进程结束；Windows GUI EXE 不能依赖 shell 的隐式等待或旧退出码。
++    result = await exec(
++      executable,
++      [resolve(scriptPath), ...(requireWin7 ? ["--require-win7"] : [])],
++      {
++        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
++        encoding: "utf8",
++        windowsHide: true,
++        timeout,
++        killSignal: "SIGKILL",
++        maxBuffer: 4 * 1024 * 1024,
++      },
++    );
++  } catch (cause) {
++    const error = new Error(
++      cause.killed
++        ? `Win7 smoke process timed out after ${timeout} ms`
++        : `Win7 smoke process failed (${cause.code || cause.signal || "spawn error"})`,
++      { cause },
++    );
++    error.stdout = cause.stdout || "";
++    error.stderr = cause.stderr || "";
++    throw error;
++  }
++  // 即使错误路径意外退出 0，没有完整成功报告也不能通过发布门禁。
++  try {
++    const report = parseSmokeResult(result.stdout);
++    if (requireWin7) assert.match(report.windows, /^6\.1\./, "Smoke must run on Windows 7");
++    return { ...result, report };
++  } catch (error) {
++    error.stdout = result.stdout;
++    error.stderr = result.stderr;
++    throw error;
++  }
++}
++
++async function main() {
++  const args = process.argv.slice(2);
++  if (args.length < 1 || args.length > 2 || (args.length === 2 && args[1] !== "--require-win7"))
++    throw new Error("Usage: node scripts/run-win7-smoke.mjs <packaged-exe> [--require-win7]");
++  const result = await runWin7Smoke({
++    executable: args[0],
++    requireWin7: args[1] === "--require-win7",
++  });
++  if (result.stderr) process.stderr.write(result.stderr);
++  console.log(`${SMOKE_PREFIX}${JSON.stringify(result.report)}`);
++}
++
++if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
++  main().catch((error) => {
++    if (error.stdout) process.stdout.write(error.stdout);
++    if (error.stderr) process.stderr.write(error.stderr);
++    console.error(error);
++    process.exitCode = 1;
++  });
++}
 diff --git a/scripts/smoke-win7-desktop.cjs b/scripts/smoke-win7-desktop.cjs
 new file mode 100644
-index 0000000..50d0d71
+index 0000000..2b2cf64
 --- /dev/null
 +++ b/scripts/smoke-win7-desktop.cjs
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,103 @@
 +// 使用安装目录中的 EXE + ELECTRON_RUN_AS_NODE=1 执行，验证最终包而非开发依赖。
 +const assert = require("node:assert/strict");
 +const { mkdtemp, rm } = require("node:fs/promises");
 +const { createRequire } = require("node:module");
 +const { tmpdir, release } = require("node:os");
-+const { dirname, join } = require("node:path");
++const { dirname, join, sep } = require("node:path");
 +const { DatabaseSync } = require("node:sqlite");
 +const { spawnSync } = require("node:child_process");
++const { assertWinptyOutput, finishSmokeProcess } = require("./win7-smoke-contract.cjs");
 +
 +async function main() {
 +  assert.equal(process.platform, "win32", "需要 Windows 上的最终桌面包");
 +  assert.equal(process.versions.electron, "44.2.0", "不能混入官方桌面运行时");
-+  if (process.argv.includes("--require-win7")) assert.match(release(), /^6\.1\./);
++  if (process.argv.includes("--require-win7"))
++    assert.match(release(), /^6\.1\./, "Windows 7 required for --require-win7");
 +  const appRoot = dirname(process.execPath);
 +  const appRequire = createRequire(join(appRoot, "resources/app.asar/package.json"));
 +  assert.equal(appRequire("./package.json").zcodeWindows7, true);
++  // 未安装包内依赖时，不能向上回退到构建工作区的 node_modules 后误报成功。
++  const ptyEntry = appRequire.resolve("node-pty").toLowerCase();
++  assert.ok(
++    ["app.asar", "app.asar.unpacked"].some((name) =>
++      ptyEntry.startsWith((join(appRoot, "resources", name) + sep).toLowerCase()),
++    ),
++    "node-pty must resolve inside the packaged application",
++  );
 +  const nodePty = appRequire("node-pty");
 +  for (const [directory, executable] of [
 +    ["ripgrep", "rg.exe"],
@@ -632,7 +952,7 @@ index 0000000..50d0d71
 +        clearTimeout(timer);
 +        try {
 +          assert.equal(exitCode, 0);
-+          assert.match(output, /(?:^|[\r\n])ZCODE_WIN7_PTY_OK(?:[\r\n]|$)/);
++          assertWinptyOutput(output);
 +          resolve();
 +        } catch (error) {
 +          reject(error);
@@ -641,19 +961,90 @@ index 0000000..50d0d71
 +      pty.resize(100, 30);
 +      pty.write("set ZCODE_SMOKE=OK\r\necho ZCODE_WIN7_PTY_%ZCODE_SMOKE%\r\nexit /b 0\r\n");
 +    });
-+    console.log(
-+      JSON.stringify({
-+        ok: true,
-+        windows: release(),
-+        versions: process.versions,
-+        checks: ["packaged-runtime", "sqlite-reopen", "winpty-input-output-resize-exit"],
-+      }),
-+    );
++    return {
++      ok: true,
++      windows: release(),
++      versions: process.versions,
++      checks: [
++        "packaged-runtime",
++        "sqlite-reopen",
++        "winpty-input-output-resize-exit",
++        "search-tools",
++      ],
++    };
 +  } finally {
 +    await rm(directory, { recursive: true, force: true });
 +  }
 +}
-+main().catch((error) => {
-+  console.error(error);
-+  process.exitCode = 1;
-+});
++finishSmokeProcess(main);
+diff --git a/scripts/win7-smoke-contract.cjs b/scripts/win7-smoke-contract.cjs
+new file mode 100644
+index 0000000..d835eda
+--- /dev/null
++++ b/scripts/win7-smoke-contract.cjs
+@@ -0,0 +1,65 @@
++const assert = require("node:assert/strict");
++const { stripVTControlCharacters } = require("node:util");
++
++const SMOKE_PREFIX = "ZCODE_WIN7_SMOKE_RESULT=";
++const SMOKE_CHECKS = Object.freeze([
++  "packaged-runtime",
++  "sqlite-reopen",
++  "winpty-input-output-resize-exit",
++  "search-tools",
++]);
++
++function assertWinptyOutput(output) {
++  // WinPTY 返回的真实结果行可能以擦除行尾等 ANSI 控制序列结尾，先去掉控制序列再判断。
++  assert.match(
++    stripVTControlCharacters(output),
++    /(?:^|[\r\n])ZCODE_WIN7_PTY_OK(?:[\r\n]|$)/,
++    "WinPTY must emit an independent successful command result line",
++  );
++}
++
++function parseSmokeResult(stdout) {
++  const reports = stdout.split(/\r?\n/).filter((line) => line.startsWith(SMOKE_PREFIX));
++  assert.equal(reports.length, 1, "Expected exactly one Win7 smoke success report");
++  const report = JSON.parse(reports[0].slice(SMOKE_PREFIX.length));
++  assert.ok(report && typeof report === "object" && !Array.isArray(report), "Invalid smoke report");
++  assert.equal(report.ok, true, "Win7 smoke report is not successful");
++  assert.match(report.windows || "", /^\d+\.\d+\.\d+(?:\.\d+)?$/, "Missing valid Windows version");
++  assert.equal(report.versions?.electron, "44.2.0", "Unexpected packaged Electron version");
++  assert.ok(
++    Array.isArray(report.checks) &&
++      report.checks.every((name) => typeof name === "string") &&
++      SMOKE_CHECKS.every((name) => report.checks.includes(name)),
++    "Win7 smoke report is missing required checks",
++  );
++  return report;
++}
++
++function writeAndExit(stream, output, exitCode) {
++  try {
++    stream.write(output, (error) => process.exit(error ? 1 : exitCode));
++  } catch {
++    process.exit(1);
++  }
++}
++
++function finishSmokeProcess(run) {
++  // WinPTY 已退出后，node-pty 的 worker 仍可能保活。独立 CLI 必须等全部检查、清理
++  // 完成，且成功报告写入回调结束后再显式退出；写入失败不能被当作成功。
++  return Promise.resolve()
++    .then(run)
++    .then((report) => {
++      writeAndExit(process.stdout, `${SMOKE_PREFIX}${JSON.stringify(report)}\n`, 0);
++    })
++    .catch((error) => {
++      writeAndExit(process.stderr, `${error?.stack || String(error)}\n`, 1);
++    });
++}
++
++module.exports = {
++  SMOKE_PREFIX,
++  SMOKE_CHECKS,
++  assertWinptyOutput,
++  parseSmokeResult,
++  finishSmokeProcess,
++};

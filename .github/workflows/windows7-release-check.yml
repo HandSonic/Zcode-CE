@@ -1,0 +1,84 @@
+name: Recheck published Win7 installer
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing experimental Win7 release tag to verify
+        required: true
+        type: string
+        default: win7-v3.15.1-ce.1
+  push:
+    branches: [codex/win7-smoke-gate]
+permissions:
+  contents: read
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          package-manager-cache: false
+      - name: Check upstream releases and existing publication
+        run: node scripts/sync-win7-upstream.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CONTROL_BRANCH: ${{ github.ref_name }}
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          package-manager-cache: false
+      - name: Test smoke failure propagation
+        run: node --test packages/desktop/test/windows7Smoke.test.mjs
+      - name: Download and verify existing release attachments
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || 'win7-v3.15.1-ce.1' }}
+        run: |
+          $assetDir = Join-Path $env:RUNNER_TEMP 'win7-release-assets'
+          gh release download "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --pattern '*-win7.exe' --pattern 'SHA256SUMS.txt' --dir "$assetDir"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installers = @(Get-ChildItem -LiteralPath $assetDir -Filter '*-win7.exe')
+          if ($installers.Count -ne 1) { throw 'Expected one installer' }
+          $installer = $installers[0]
+          $sums = (Get-Content -LiteralPath (Join-Path $assetDir 'SHA256SUMS.txt') -Raw).Trim()
+          $actual = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sums -cne "$actual  $($installer.Name)") { throw 'Installer checksum mismatch' }
+          "WIN7_INSTALLER=$($installer.FullName)" >> $env:GITHUB_ENV
+      - name: Install published package on the modern Windows runner
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP 'win7-release-installed'
+          $installer = Start-Process -FilePath $env:WIN7_INSTALLER -ArgumentList "/S /D=$installDir" -Wait -PassThru
+          if ($installer.ExitCode -ne 0) { throw "Installer failed: $($installer.ExitCode)" }
+          $exe = Join-Path $installDir 'ZCode-CE.exe'
+          if (!(Test-Path -LiteralPath $exe)) { throw 'Installed executable is missing' }
+          "WIN7_INSTALLED_EXE=$exe" >> $env:GITHUB_ENV
+      - name: Require-Win7 probe must fail on this modern Windows host
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { spawnSync } from 'node:child_process';
+          const result = spawnSync(process.execPath, ['scripts/run-win7-smoke.mjs', process.env.WIN7_INSTALLED_EXE, '--require-win7'], { encoding: 'utf8', timeout: 60000 });
+          assert.ifError(result.error);
+          assert.equal(result.status, 1, 'The smoke gate must propagate the rejected Windows version');
+          assert.match(result.stderr, /Windows 7 required/);
+          console.log('Negative runtime probe correctly blocked success.');
+          NODE
+      - name: Verify installed SQLite, WinPTY and search tools
+        shell: pwsh
+        run: node scripts/run-win7-smoke.mjs "$env:WIN7_INSTALLED_EXE"

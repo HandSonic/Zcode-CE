@@ -339,7 +339,7 @@ test("写权限 job 等待两套验证，执行可信控制代码；候选只在
   assert.equal(workflow.permissions.contents, "read");
   assert.deepEqual(workflow.jobs.publish.needs, ["prepare", "verify", "build"]);
   assert.deepEqual(workflow.jobs.publish.permissions, { contents: "write" });
-  assert.equal(workflow.on.schedule[0].cron, "17 * * * *");
+  assert.equal(workflow.on.schedule[0].cron, "17 2 * * *");
   assert.ok(workflow.on.workflow_dispatch.inputs.release_tag);
   for (const name of ["verify", "build"]) {
     const job = workflow.jobs[name];

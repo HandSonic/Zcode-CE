@@ -3,17 +3,27 @@ const assert = require("node:assert/strict");
 const { mkdtemp, rm } = require("node:fs/promises");
 const { createRequire } = require("node:module");
 const { tmpdir, release } = require("node:os");
-const { dirname, join } = require("node:path");
+const { dirname, join, sep } = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 const { spawnSync } = require("node:child_process");
+const { assertWinptyOutput, finishSmokeProcess } = require("./win7-smoke-contract.cjs");
 
 async function main() {
   assert.equal(process.platform, "win32", "需要 Windows 上的最终桌面包");
   assert.equal(process.versions.electron, "44.2.0", "不能混入官方桌面运行时");
-  if (process.argv.includes("--require-win7")) assert.match(release(), /^6\.1\./);
+  if (process.argv.includes("--require-win7"))
+    assert.match(release(), /^6\.1\./, "Windows 7 required for --require-win7");
   const appRoot = dirname(process.execPath);
   const appRequire = createRequire(join(appRoot, "resources/app.asar/package.json"));
   assert.equal(appRequire("./package.json").zcodeWindows7, true);
+  // 未安装包内依赖时，不能向上回退到构建工作区的 node_modules 后误报成功。
+  const ptyEntry = appRequire.resolve("node-pty").toLowerCase();
+  assert.ok(
+    ["app.asar", "app.asar.unpacked"].some((name) =>
+      ptyEntry.startsWith((join(appRoot, "resources", name) + sep).toLowerCase()),
+    ),
+    "node-pty must resolve inside the packaged application",
+  );
   const nodePty = appRequire("node-pty");
   for (const [directory, executable] of [
     ["ripgrep", "rg.exe"],
@@ -66,7 +76,7 @@ async function main() {
         clearTimeout(timer);
         try {
           assert.equal(exitCode, 0);
-          assert.match(output, /(?:^|[\r\n])ZCODE_WIN7_PTY_OK(?:[\r\n]|$)/);
+          assertWinptyOutput(output);
           resolve();
         } catch (error) {
           reject(error);
@@ -75,19 +85,19 @@ async function main() {
       pty.resize(100, 30);
       pty.write("set ZCODE_SMOKE=OK\r\necho ZCODE_WIN7_PTY_%ZCODE_SMOKE%\r\nexit /b 0\r\n");
     });
-    console.log(
-      JSON.stringify({
-        ok: true,
-        windows: release(),
-        versions: process.versions,
-        checks: ["packaged-runtime", "sqlite-reopen", "winpty-input-output-resize-exit"],
-      }),
-    );
+    return {
+      ok: true,
+      windows: release(),
+      versions: process.versions,
+      checks: [
+        "packaged-runtime",
+        "sqlite-reopen",
+        "winpty-input-output-resize-exit",
+        "search-tools",
+      ],
+    };
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 }
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+finishSmokeProcess(main);
