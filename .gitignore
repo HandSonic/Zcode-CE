@@ -74,3 +74,7 @@ packages/desktop/.e2e-artifacts/
 packages/desktop/.e2e-cache/
 packages/desktop/.e2e-network-capture/
 .zcode-runtime/
+
+# Reproducible Windows 7 experimental runtime and installer output.
+packages/desktop/.cache/win7/
+packages/desktop/dist-win7/

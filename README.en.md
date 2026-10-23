@@ -1,5 +1,9 @@
 # ZCode-CE
 
+Experimental Windows 7 SP1 x64 desktop build: `pnpm bundle:desktop:win7`.
+Uses a pinned third-party Electron runtime; Windows 7 hardware validation is pending.
+See [build instructions and acceptance criteria](docs/development/windows7-desktop.md).
+
 <div align="center">
   <img src="public/logo/icons/1024x1024.png" alt="ZCode-CE" width="128" height="128" />
 </div>

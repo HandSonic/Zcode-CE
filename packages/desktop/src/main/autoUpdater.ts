@@ -1588,7 +1588,8 @@ export async function acknowledgePostUpdateReleaseNotes(
 }
 
 export async function initAutoUpdater(options: InitAutoUpdaterOptions = {}): Promise<void> {
-  if (options.enabled === false) {
+  // Win7 实验包不能从常规更新源安装官方 Electron，否则更新后将无法启动。
+  if (options.enabled === false || process.env.ZCODE_WINDOWS7 === "1") {
     autoUpdaterDisabledForProductFlavor = true;
     if (autoUpdatePollTimer) {
       clearInterval(autoUpdatePollTimer);

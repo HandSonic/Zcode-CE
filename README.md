@@ -67,6 +67,10 @@ ZCode-CE 基于 [zai-org/ZCode](https://github.com/zai-org/ZCode)（Apache-2.0�
 
 ### 桌面应用
 
+Windows 7 SP1 x64 的本机桌面**实验构建入口**：`pnpm bundle:desktop:win7`。
+使用固定校验和的第三方 Electron 运行时，尚未完成 Win7 真机验收；构建与验收边界见
+[Windows 7 桌面移植](docs/development/windows7-desktop.md)。
+
 从 [Releases](https://github.com/Zcode-CE/Zcode-CE/releases) 下载对应平台的安装包。
 
 | 平台        | 格式                                           | 说明                                                                                                                                                                                                                                                                                 |
