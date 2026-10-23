@@ -51,6 +51,10 @@ CI 或 Linux 上的单元测试不能替代上述最终安装包的 Win7 真机�
 
 `.github/workflows/windows7-experimental.yml` 在现代 Windows runner 构建并上传实验安装包，
 同时使用包内 EXE 实测 SQLite 持久化及 WinPTY 输入、输出、resize 和退出；该结果不等同于 Win7 验收。
+CI 通过 Node runner 等待 EXE 结束，并同时校验退出码和结构化成功报告；终端控制字符不会作为命令结果文字比较。
+独立 smoke 完成全部检查及清理后，写完报告再显式退出，避免已退出的 WinPTY 所留工作线程保活；检查失败或清理失败仍返回非零退出码。
+`.github/workflows/windows7-release-check.yml` 可手动下载并校验已公开的安装包，在现代 Windows runner 静默安装后重跑同一 smoke 门禁，
+并用 `--require-win7` 反向探针证明失败不会被误报成成功；这仍不是 Win7 真机测试。
 将安装包装到 Win7 后，用 cmd 执行（脚本取自本仓库）：
 
 ```bat

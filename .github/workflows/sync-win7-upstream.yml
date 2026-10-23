@@ -137,11 +137,7 @@ jobs:
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
           ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
       - name: Verify final package
-        shell: pwsh
-        run: |
-          $env:ELECTRON_RUN_AS_NODE = '1'
-          & './packages/desktop/dist-win7/win-unpacked/ZCode-CE.exe' "$PWD/scripts/smoke-win7-desktop.cjs"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: node scripts/run-win7-smoke.mjs ./packages/desktop/dist-win7/win-unpacked/ZCode-CE.exe
       - uses: actions/upload-artifact@v4
         with:
           name: ZCode-CE-${{ needs.prepare.outputs.upstreamTag }}-win7-experimental
