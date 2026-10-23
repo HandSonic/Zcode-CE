@@ -1,11 +1,15 @@
-name: Sync Win7 with upstream
+name: Build Win7 from upstream releases
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       target_branch:
-        description: Win7 maintenance branch (empty uses the default branch)
+        description: Trusted Win7 control branch (empty uses the default branch)
+        type: string
+        default: ""
+      release_tag:
+        description: Published stable upstream tag (empty builds oldest pending release)
         type: string
         default: ""
   push:
@@ -14,7 +18,9 @@ on:
       - .github/workflows/sync-win7-upstream.yml
       - scripts/sync-win7-upstream.mjs
       - scripts/publish-win7-upstream.mjs
-      - scripts/test/win7UpstreamSync.test.mjs
+      - scripts/test/win7Upstream*.test.mjs
+      - config/windows7-release.json
+      - patches/windows7-desktop.patch
 permissions:
   contents: read
 concurrency:
@@ -26,33 +32,37 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
     outputs:
       changed: ${{ steps.sync.outputs.changed }}
-      baseSha: ${{ steps.sync.outputs.baseSha }}
-      upstreamSha: ${{ steps.sync.outputs.upstreamSha }}
+      controllerSha: ${{ steps.sync.outputs.controllerSha }}
+      upstreamTag: ${{ steps.sync.outputs.upstreamTag }}
+      outputTag: ${{ steps.sync.outputs.outputTag }}
       candidateSha: ${{ steps.sync.outputs.candidateSha }}
-      baseBranch: ${{ steps.sync.outputs.baseBranch }}
+      controlBranch: ${{ steps.sync.outputs.controlBranch }}
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ inputs.target_branch || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: 24.14.0
           package-manager-cache: false
-      - name: Prepare merge candidate without publishing it
+      - name: Prepare exact release tag with Win7 patch
         id: sync
         run: node scripts/sync-win7-upstream.mjs
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SYNC_BASE_BRANCH: ${{ inputs.target_branch || (github.event_name == 'push' && github.ref_name) || github.event.repository.default_branch }}
+          CONTROL_BRANCH: ${{ inputs.target_branch || (github.event_name == 'push' && github.ref_name) || github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
       - uses: actions/upload-artifact@v4
         if: steps.sync.outputs.changed == 'true'
         with:
           name: win7-upstream-candidate
-          path: .tmp/win7-upstream.bundle
+          path: |
+            .tmp/win7-upstream.bundle
+            .tmp/win7-release.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -64,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.prepare.outputs.baseSha }}
+          ref: ${{ needs.prepare.outputs.controllerSha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@v4
@@ -99,7 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.prepare.outputs.baseSha }}
+          ref: ${{ needs.prepare.outputs.controllerSha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@v4
@@ -134,7 +144,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
-          name: ZCode-CE-win7-upstream-experimental
+          name: ZCode-CE-${{ needs.prepare.outputs.upstreamTag }}-win7-experimental
           path: packages/desktop/dist-win7/*-win7.exe
           if-no-files-found: error
           retention-days: 14
@@ -144,12 +154,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
     steps:
       # 控制代码来自触发该运行的可信提交，绝不 checkout 候选后执行其脚本。
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.prepare.outputs.controllerSha }}
           fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
@@ -159,11 +168,14 @@ jobs:
         with:
           name: win7-upstream-candidate
           path: .tmp
-      - name: Publish validated update PR
+      - uses: actions/download-artifact@v4
+        with:
+          name: ZCode-CE-${{ needs.prepare.outputs.upstreamTag }}-win7-experimental
+          path: .tmp/win7-installers
+      - name: Publish verified Win7 experimental release
         run: node scripts/publish-win7-upstream.mjs
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SYNC_BASE_SHA: ${{ needs.prepare.outputs.baseSha }}
-          SYNC_UPSTREAM_SHA: ${{ needs.prepare.outputs.upstreamSha }}
-          SYNC_CANDIDATE_SHA: ${{ needs.prepare.outputs.candidateSha }}
-          SYNC_BASE_BRANCH: ${{ needs.prepare.outputs.baseBranch }}
+          CONTROLLER_SHA: ${{ needs.prepare.outputs.controllerSha }}
+          CANDIDATE_SHA: ${{ needs.prepare.outputs.candidateSha }}
+          CONTROL_BRANCH: ${{ needs.prepare.outputs.controlBranch }}

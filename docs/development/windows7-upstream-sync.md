@@ -1,53 +1,67 @@
-# Win7 自动跟随直接上游
+# 上游正式 Release 自动构建 Win7 版
 
-## 产品规则与边界
+## 规则与来源
 
-直接上游固定为 GitHub fork parent `Zcode-CE/Zcode-CE` 的 `main`。
-`zai-org/ZCode` 的功能筛选继续由 CE 维护者负责，本自动化不跨过 CE 直接合入原始上游。
-目标是在保留 Win7 补丁的前提下自动准备、验证并提出更新，不自动合入未经 Win7 真机验收的代码。
+来源固定为直接上游 `Zcode-CE/Zcode-CE` 的已发布正式 Release，排除 draft 和 prerelease。
+不按 main 的普通提交触发构建，也不直接跟随 `zai-org/ZCode`。
+每小时检查一次；从 v3.15.1-ce.1 的发布时间起，按发布时间顺序每轮处理一个尚未产出 Win7 版的正式 Release。
+因此同一检查间隔内发布多个版本不会跳过中间版本。手动运行可以指定一个已发布正式 Release 的 tag。
+定时任务须进入默认分支并在 Actions 中启用；功能分支的演练不代表定时任务已启用。
 
-`.github/workflows/sync-win7-upstream.yml` 每六小时检查一次，也可手动执行。
-定时任务只有进入仓库默认分支后才生效；公开 fork 还需在 Actions 中启用相应工作流。
-默认维护目标为默认分支，手动运行可指定已包含 Win7 构建入口的其他维护分支。
-配置尚在 PR 中时不应声称定时任务已经启用。
+## 精确源码与补丁
 
-唯一状态来源是 Git：目标分支 SHA、上游 SHA、确定性候选提交，以及该组合对应的同步 PR。
-同一目标/上游组合重复执行复用同一候选分支和 PR；人工关闭的 PR 不自动重开。
-上游无新提交时不安装依赖、不构建、不创建 PR。
+发布 tag 必须解析到具体 Git commit，不能用 Release 的 target_commitish/main 代替。
+候选树由该 tag 的完整源码应用 `patches/windows7-desktop.patch` 生成；三方应用补丁失败时直接停止，
+不得改成构建 main、忽略补丁冲突或静默缺失 Win7 修改。
+补丁基线与首次生成来源记录在 `config/windows7-release.json`；补丁是独立维护的应用改动，
+不会把维护分支随后新增的上游未发布代码带进旧 Release。
 
-## 合入策略
+`.github/workflows/**` 属于 fork 控制面，候选保留控制提交中的版本；除此之外不混入维护分支应用源码。
+候选只有可信控制提交作为父提交，tree 则来自 Release+Win7 补丁；上游 tag SHA 单独写入清单。
+这样 GitHub Token 不需要取得上游 workflow 的写权限，也不会把未受信任的上游 workflow 用作发布控制代码。
+候选的 package.json.version 必须等于 tag 去掉 v 前缀的版本，安装包保留该上游版本号及 win7 文件名标记。
 
-采用三方 merge 保留本仓库的 Win7 改动，禁止 reset 到上游或使用 theirs 强行解决应用代码冲突。
-`.github/workflows/**` 是 fork 自己维护的控制面，始终保留目标分支版本，包括删除上游新增的 workflow。
-这项排除会在同步 PR 中明确声明，表示同步应用源码，不宣称逐文件镜像上游。
-应用代码出现冲突时 abort merge、列出冲突路径并失败，目标分支保持不动。
-固定的社区 Electron 运行时及 SHA-256 不会因自动跟随而升级。
+## 检查、打包和发布
 
-## 验证与凭据
+准备 job 只读生成 Git bundle 与来源清单。只读 Linux job 执行类型、Lint、格式、测试、架构检查；
+只读 Windows job 构建 Win7 安装包，使用包内 EXE 检查 SQLite、WinPTY 和搜索工具。
+候选 job 不保留 Git 凭据、不提供写 token。控制 job 不安装候选依赖，也不执行候选中的发布脚本。
 
-控制工作流先在只读 job 中产生 Git bundle，再由只读 Linux job 执行类型、Lint、格式、测试、架构检查，
-并由只读 Windows job 构建 Win7 包、运行 SQLite/WinPTY/搜索工具的最终包 smoke。
-这些验证在同一个 workflow run 内显式衔接，不依赖机器人 push/PR 再触发另一套 CI。
-现代 Windows smoke 仍不能替代 Win7 真机验收，实验标记保留。
+发布状态由 GitHub Release 的 draft / prerelease 状态唯一保存；幂等键是上游 Release ID 和 tag commit。
+控制分支 SHA 是验证租约，发生移动后旧候选不得发布。失败 draft 可由同一来源的重跑补齐。
 
-只有全部验证成功，独立发布 job 才获取 contents/pull-requests 写权限。
-该 job 重新检出可信控制代码，仅通过 Git 读取候选，不执行候选中的脚本或安装其依赖。
-发布前复核目标分支 SHA；目标已移动则失败，等待下一轮重建。
-候选使用包含目标 SHA 与上游 SHA 的专用分支；同名分支已被修改则拒绝覆盖，不 force push。
-新 PR 的说明包含两个 SHA、运行链接、控制面排除及 Win7 真机验证边界。
-上传、推送或创建 PR 失败必须使整个工作流失败，不能吞掉错误。
+```mermaid
+flowchart TD
+  A[正式 Release 加 Win7 补丁] --> B[只读验证]
+  A --> C[Windows 构建和包内 smoke]
+  B --> D[写权限发布 job]
+  C --> D
+  D --> E[草稿上传并核对附件]
+  E --> F[公开实验版]
+```
 
-使用仓库内置 GITHUB_TOKEN，无需额外 PAT。仓库 Settings → Actions → General 的
-“Allow GitHub Actions to create and approve pull requests” 需允许创建 PR；若禁止，发布步骤明确失败。
-自动同步不发布正式 Release、不自动安装到用户电脑、不向常规桌面更新源投放安装包。
+只有验证和 Windows 构建全部成功，独立 contents:write job 才自动发布 fork 的 GitHub Release：
+
+- Tag：`win7-<上游tag>`，例如 `win7-v3.15.1-ce.1`。
+- 标为 prerelease，名称明确写 Win7 experimental；不接管常规桌面 latest 或自动更新源。
+- 附件包括对应版本的 win7.exe、SHA256SUMS.txt、win7-release.json。
+- 清单记录上游 Release ID/tag/commit、补丁 SHA-256、控制提交、候选提交、运行链接及附件哈希。
+
+发布采用 draft → 上传并核对全部附件 → 转为公开 prerelease 的顺序。
+失败保留 draft 以便重跑，不改动既有公开版本；未完成上传不能报告成功。
+同来源且输出 tag 尚未创建的 draft，可在控制代码修复并重新验证后迁移到新候选；
+输出 tag 已存在且指向旧候选时停止，需人工核查草稿与 tag，不能自动强推覆盖。
+相同正式 Release 成功产出后不重复构建；上游重写同名 tag、已发布结果不完整或标签指向不符时失败，禁止覆盖。
+构建过程中控制分支移动时停止发布，重新基于最新控制代码验证。
+不依赖创建 PR 权限、不等待人工合并同步 PR；上游每次正式发版后可自动得到可下载 Win7 实验包。
+现代 Windows smoke 不代替 Win7 真机验收，固定社区 Electron 版本和摘要不自动升级。
 
 ## 验收
 
-1. 上游已是目标祖先：返回无变化，目标 SHA 不动，不产生 bundle。
-2. 上游有独立功能变更：候选同时保留 Win7 补丁与新功能，且两个原提交都是其祖先。
-3. 两方修改同一应用文件造成冲突：失败并清理 merge 状态，保留目标原文与 SHA。
-4. 两方修改 workflow：保留目标 workflow，不引入上游新增 workflow；其余源码正常合入。
-5. 相同两个 SHA 重试得到相同候选 SHA；已有 PR 不重复创建，人工关闭的 PR 不重开。
-6. 类型/测试/构建/smoke 任一步失败，不执行写权限发布 job。
-7. 构建期间目标分支发生移动，或候选分支出现人工提交：拒绝发布/覆盖。
-8. 定时检查只有在默认分支工作流启用后才算已激活。
+1. 草稿、预发布、main 普通提交不触发 Release 构建；多个待处理正式版本按时间顺序逐一处理。
+2. 即使维护分支领先于 tag，候选也不包含这些未发布应用代码；只包含显式 Win7 补丁和自有 workflow。
+3. 真实补丁可应用于当前正式 Release，版本号与 tag 匹配，bundle 能被另一个 checkout 消费。
+4. 补丁冲突、版本号不符、tag 被重写、候选摘要不符时停止。
+5. 检查、打包、smoke、附件上传任一失败都不能发布公开 Release。
+6. 发布重跑不重复创建版本，不覆盖已发布附件；成功版本具有可核对的全部清单和哈希。
+7. 定时工作流只有进入默认分支且处于启用状态后才视为生效。

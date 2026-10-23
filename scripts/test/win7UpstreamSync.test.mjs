@@ -1,158 +1,243 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { prepareUpstreamMerge } from "../sync-win7-upstream.mjs";
+import {
+  CANDIDATE_REF,
+  assertPublishedRelease,
+  pendingReleases,
+  prepareReleaseCandidate,
+  releaseTagName,
+  sourceMarker,
+} from "../sync-win7-upstream.mjs";
 
 const execFileAsync = promisify(execFile);
 const fixtureRoot = resolve(import.meta.dirname, "../../.tmp");
-const upstreamRef = "refs/heads/upstream";
 
+async function rawGit(cwd, ...args) {
+  return (
+    await execFileAsync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
+        GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
+      },
+    })
+  ).stdout;
+}
 async function git(cwd, ...args) {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
-      GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
-    },
-  });
-  return stdout.trim();
+  return (await rawGit(cwd, ...args)).trim();
 }
-
-async function configure(cwd) {
-  await git(cwd, "config", "user.name", "Win7 sync fixture");
-  await git(cwd, "config", "user.email", "win7-sync@example.invalid");
-  await git(cwd, "config", "commit.gpgsign", "false");
-  await git(cwd, "config", "core.autocrlf", "false");
-}
-
 async function put(cwd, path, contents) {
-  const absolutePath = join(cwd, path);
-  await mkdir(dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, contents);
+  const absolute = join(cwd, path);
+  await mkdir(dirname(absolute), { recursive: true });
+  await writeFile(absolute, contents);
 }
-
 async function commit(cwd, message) {
   await git(cwd, "add", "--all");
   await git(cwd, "commit", "-m", message);
   return git(cwd, "rev-parse", "HEAD");
 }
-
-async function fixture(t, { forkApp = false, forkWorkflow = false } = {}) {
+async function fixture(t) {
   await mkdir(fixtureRoot, { recursive: true });
-  const directory = await mkdtemp(join(fixtureRoot, "win7-upstream-"));
+  const directory = await mkdtemp(join(fixtureRoot, "win7-release-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = join(directory, "repo");
   await mkdir(cwd);
   await git(cwd, "init", "-b", "main");
-  await configure(cwd);
-  await put(cwd, "app.txt", "common\n");
-  await put(cwd, ".github/workflows/ci.yml", "name: Common CI\n");
-  await put(cwd, ".github/workflows/preserve.yml", "name: Preserve this workflow\n");
-  const commonSha = await commit(cwd, "common ancestor");
-  await git(cwd, "branch", "upstream");
-  await git(cwd, "checkout", "-b", "win7");
-  await put(cwd, "win7-compat.txt", "keep the Windows 7 compatibility patch\n");
-  if (forkApp) await put(cwd, "app.txt", "fork application change\n");
-  if (forkWorkflow) await put(cwd, ".github/workflows/ci.yml", "name: Windows 7 CI\n");
-  const baseSha = await commit(cwd, "Windows 7 fork patch");
-  return { directory, cwd, commonSha, baseSha, bundlePath: join(directory, "candidate.bundle") };
+  await git(cwd, "config", "user.name", "Win7 release fixture");
+  await git(cwd, "config", "user.email", "win7-release@example.invalid");
+  await git(cwd, "config", "commit.gpgsign", "false");
+  await git(cwd, "config", "tag.gpgsign", "false");
+  await git(cwd, "config", "core.autocrlf", "false");
+  const originalPackage = {
+    name: "release-fixture",
+    version: "1.2.3",
+    scripts: { build: "node build.mjs" },
+  };
+  await put(cwd, "package.json", JSON.stringify(originalPackage, null, 2) + "\n");
+  await put(cwd, "app.txt", "released application\n");
+  await put(cwd, ".github/workflows/upstream-only.yml", "name: Upstream release workflow\n");
+  const upstreamSha = await commit(cwd, "exact published source");
+  const upstreamTag = "v1.2.3";
+  await git(cwd, "tag", "-a", upstreamTag, "-m", "published release", upstreamSha);
+
+  await git(cwd, "checkout", "-b", "patch-source");
+  await put(
+    cwd,
+    "package.json",
+    JSON.stringify(
+      {
+        ...originalPackage,
+        scripts: { ...originalPackage.scripts, "bundle:desktop:win7": "node win7.mjs" },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  await put(cwd, "app.txt", "released application with Windows 7 adapter\n");
+  await put(cwd, "win7-compat.txt", "explicit static compatibility patch\n");
+  const patchCommit = await commit(cwd, "static Windows 7 patch");
+  const patchPath = join(directory, "windows7.patch");
+  const patch = await rawGit(cwd, "diff", "--binary", "--full-index", upstreamSha, patchCommit);
+  await writeFile(patchPath, patch);
+
+  await git(cwd, "checkout", "-b", "controller");
+  await put(cwd, "app.txt", "unpublished maintenance application\n");
+  await put(cwd, "maintenance-extra.txt", "must never leak into the released source\n");
+  await put(
+    cwd,
+    "package.json",
+    JSON.stringify({ ...originalPackage, version: "9.9.9" }, null, 2) + "\n",
+  );
+  await rm(join(cwd, ".github/workflows/upstream-only.yml"));
+  await put(cwd, ".github/workflows/fork.yml", "name: Trusted fork workflow\n");
+  const controllerSha = await commit(cwd, "trusted controller with newer unpublished code");
+  return {
+    directory,
+    cwd,
+    upstreamSha,
+    upstreamTag,
+    controllerSha,
+    patchPath,
+    upstreamRef: `refs/tags/${upstreamTag}`,
+    bundlePath: join(directory, "candidate.bundle"),
+  };
 }
 
-async function changeUpstream(f, change) {
-  await git(f.cwd, "checkout", "upstream");
-  await change();
-  const upstreamSha = await commit(f.cwd, "upstream update");
-  await git(f.cwd, "checkout", "win7");
-  return upstreamSha;
-}
-
-async function missing(path) {
-  await assert.rejects(stat(path), { code: "ENOENT" });
-}
-
-test("上游已是 fork 祖先时不创建候选或 bundle", async (t) => {
-  const f = await fixture(t);
-  const result = await prepareUpstreamMerge({ cwd: f.cwd, upstreamRef, bundlePath: f.bundlePath });
-  assert.equal(result.changed, false);
-  assert.equal(result.baseSha, f.baseSha);
-  assert.equal(result.upstreamSha, f.commonSha);
-  assert.equal(await git(f.cwd, "rev-parse", "HEAD"), f.baseSha);
-  assert.equal(await git(f.cwd, "status", "--porcelain"), "");
-  await missing(f.bundlePath);
+const formal = (id, tag, published_at, extra = {}) => ({
+  id,
+  tag_name: tag,
+  published_at,
+  draft: false,
+  prerelease: false,
+  ...extra,
+});
+const manifest = {
+  upstreamReleaseId: 42,
+  upstreamCommit: "a".repeat(40),
+  outputTag: "win7-v1.2.3",
+};
+const asset = (name, extra = {}) => ({
+  name,
+  state: "uploaded",
+  size: 123,
+  digest: `sha256:${"b".repeat(64)}`,
+  ...extra,
+});
+const published = (extra = {}) => ({
+  tag_name: manifest.outputTag,
+  target_commitish: "c".repeat(40),
+  draft: false,
+  prerelease: true,
+  body: `Win7 experimental\n${sourceMarker(manifest)}`,
+  assets: [
+    asset("ZCode-CE-1.2.3-win-x64-win7.exe"),
+    asset("SHA256SUMS.txt"),
+    asset("win7-release.json"),
+  ],
+  ...extra,
 });
 
-test("保留 Win7 补丁并合入上游功能，bundle 可被只有 base 历史的 checkout 消费", async (t) => {
-  const f = await fixture(t);
-  const upstreamSha = await changeUpstream(f, () =>
-    put(f.cwd, "feature.txt", "new upstream feature\n"),
+test("版本tag产生隔离的Win7标签，拒绝main和不合法的Git版本名", () => {
+  assert.equal(releaseTagName("v3.15.1-ce.1"), "win7-v3.15.1-ce.1");
+  assert.equal(releaseTagName("1.2.3"), "win7-1.2.3");
+  for (const tag of ["main", "v../1.2.3", "--v1.2.3", "v1.2", "v1.2.3/extra"]) {
+    assert.throws(() => releaseTagName(tag), undefined, tag);
+  }
+});
+
+test("只按已发布正式Release的时间排序，不跳过同一轮中的中间版本", () => {
+  const releases = [
+    formal(4, "v1.2.4", "2026-10-22T04:00:00Z"),
+    formal(2, "v1.2.2", "2026-10-22T02:00:00Z"),
+    formal(3, "v1.2.3", "2026-10-22T02:00:00Z"),
+    formal(1, "v1.2.1", "2026-10-21T23:00:00Z"),
+    formal(5, "v1.2.5", "2026-10-22T05:00:00Z", { draft: true }),
+    formal(6, "v1.2.6", "2026-10-22T06:00:00Z", { prerelease: true }),
+  ];
+  const minimum = "2026-10-22T00:00:00Z";
+  assert.deepEqual(
+    pendingReleases(releases, minimum).map((release) => release.id),
+    [2, 3, 4],
   );
-  const result = await prepareUpstreamMerge({ cwd: f.cwd, upstreamRef, bundlePath: f.bundlePath });
-  assert.equal(result.changed, true);
-  assert.equal(result.baseSha, f.baseSha);
-  assert.equal(result.upstreamSha, upstreamSha);
-  assert.match(result.candidateSha, /^[a-f0-9]{40}$/);
+  assert.deepEqual(
+    pendingReleases(releases, minimum, "v1.2.1").map((release) => release.id),
+    [1],
+  );
+  assert.deepEqual(pendingReleases(releases, minimum, "v1.2.5"), []);
+  assert.deepEqual(pendingReleases(releases, minimum, "v1.2.6"), []);
+  assert.throws(() => pendingReleases(releases, "invalid date"));
+  assert.throws(() => pendingReleases([formal(1, "v1.2.1", "invalid date")], minimum));
+  assert.throws(() => pendingReleases([formal(0, "v1.2.1", minimum)], minimum));
+});
+
+test("已公开Win7版本必须有正确来源、完整附件和精确目标SHA", () => {
+  assert.equal(sourceMarker(manifest), `<!-- win7-release:42:${"a".repeat(40)} -->`);
+  assert.equal(assertPublishedRelease(undefined, manifest), false);
+  assert.equal(assertPublishedRelease(published({ draft: true }), manifest), false);
+  assert.equal(assertPublishedRelease(published(), manifest), true);
+  for (const release of [
+    published({ body: "another source" }),
+    published({ tag_name: "win7-v9.9.9" }),
+    published({ prerelease: false }),
+    published({ target_commitish: "main" }),
+    published({ assets: [asset("SHA256SUMS.txt"), asset("win7-release.json")] }),
+    published({ assets: [asset("ZCode-CE-1.2.3-win-x64-win7.exe"), asset("SHA256SUMS.txt")] }),
+    published({ assets: [...published().assets, asset("second-win7.exe")] }),
+    published({ assets: published().assets.map((item) => asset(item.name, { size: 0 })) }),
+    published({ assets: published().assets.map((item) => asset(item.name, { state: "new" })) }),
+    published({
+      assets: published().assets.map((item) => asset(item.name, { digest: "sha256:bad" })),
+    }),
+  ])
+    assert.throws(() => assertPublishedRelease(release, manifest));
+  assert.throws(() => assertPublishedRelease(published(), { ...manifest, upstreamReleaseId: 43 }));
+  assert.throws(() =>
+    assertPublishedRelease(published(), { ...manifest, upstreamCommit: "d".repeat(40) }),
+  );
+});
+
+test("候选严格来自精确annotated tag+静态补丁，不带maintenance额外应用代码", async (t) => {
+  const f = await fixture(t);
+  assert.notEqual(await git(f.cwd, "rev-parse", f.upstreamRef), f.upstreamSha);
+  const result = await prepareReleaseCandidate(f);
+  assert.equal(result.upstreamSha, f.upstreamSha);
+  assert.equal(result.packageVersion, "1.2.3");
+  assert.equal(
+    result.patchSha256,
+    createHash("sha256")
+      .update(await readFile(f.patchPath))
+      .digest("hex"),
+  );
   const parents = (await git(f.cwd, "rev-list", "--parents", "-n", "1", result.candidateSha)).split(
     " ",
   );
-  assert.deepEqual(parents, [result.candidateSha, f.baseSha, upstreamSha]);
+  assert.deepEqual(parents, [result.candidateSha, f.controllerSha]);
   assert.equal(
-    await git(f.cwd, "bundle", "list-heads", f.bundlePath, "refs/heads/win7-upstream-candidate"),
-    `${result.candidateSha} refs/heads/win7-upstream-candidate`,
+    await git(f.cwd, "show", `${result.candidateSha}:app.txt`),
+    "released application with Windows 7 adapter",
   );
-
-  const consumer = join(f.directory, "consumer");
-  await mkdir(consumer);
-  await git(consumer, "init", "-b", "main");
-  await git(consumer, "fetch", "--no-tags", f.cwd, f.baseSha);
-  await git(consumer, "checkout", "--detach", "FETCH_HEAD");
-  await assert.rejects(git(consumer, "cat-file", "-e", `${result.candidateSha}^{commit}`));
-  await git(consumer, "bundle", "verify", f.bundlePath);
-  await git(
-    consumer,
-    "fetch",
-    f.bundlePath,
-    "refs/heads/win7-upstream-candidate:refs/heads/candidate",
-  );
-  await git(consumer, "checkout", "--detach", "candidate");
-  assert.equal(await git(consumer, "rev-parse", "HEAD"), result.candidateSha);
   assert.equal(
-    await readFile(join(consumer, "win7-compat.txt"), "utf8"),
-    "keep the Windows 7 compatibility patch\n",
+    await git(f.cwd, "show", `${result.candidateSha}:win7-compat.txt`),
+    "explicit static compatibility patch",
   );
-  assert.equal(await readFile(join(consumer, "feature.txt"), "utf8"), "new upstream feature\n");
-});
-
-test("应用代码冲突必须 abort，HEAD、文件与干净状态不变", async (t) => {
-  const f = await fixture(t, { forkApp: true });
-  await changeUpstream(f, () => put(f.cwd, "app.txt", "upstream conflicting application change\n"));
-  await assert.rejects(prepareUpstreamMerge({ cwd: f.cwd, upstreamRef, bundlePath: f.bundlePath }));
-  assert.equal(await git(f.cwd, "rev-parse", "HEAD"), f.baseSha);
-  assert.equal(await readFile(join(f.cwd, "app.txt"), "utf8"), "fork application change\n");
-  assert.equal(await git(f.cwd, "status", "--porcelain"), "");
-  await assert.rejects(git(f.cwd, "rev-parse", "--verify", "MERGE_HEAD"));
-  await missing(f.bundlePath);
-});
-
-test("workflow 归 fork 所有：保留改动及上游删除项，移除上游新增项，同时合入应用代码", async (t) => {
-  const f = await fixture(t, { forkWorkflow: true });
-  await changeUpstream(f, async () => {
-    await put(f.cwd, ".github/workflows/ci.yml", "name: Conflicting upstream CI\n");
-    await put(f.cwd, ".github/workflows/upstream-only.yml", "name: New upstream workflow\n");
-    await rm(join(f.cwd, ".github/workflows/preserve.yml"));
-    await put(f.cwd, "feature.txt", "upstream feature still belongs in the merge\n");
-  });
-  const result = await prepareUpstreamMerge({ cwd: f.cwd, upstreamRef, bundlePath: f.bundlePath });
-  assert.equal(result.changed, true);
+  await assert.rejects(
+    git(f.cwd, "cat-file", "-e", `${result.candidateSha}:maintenance-extra.txt`),
+  );
+  const pkg = JSON.parse(await git(f.cwd, "show", `${result.candidateSha}:package.json`));
+  assert.equal(pkg.version, "1.2.3");
+  assert.equal(pkg.scripts["bundle:desktop:win7"], "node win7.mjs");
   assert.equal(
     await git(
       f.cwd,
       "diff",
       "--name-only",
-      f.baseSha,
+      f.controllerSha,
       result.candidateSha,
       "--",
       ".github/workflows",
@@ -160,46 +245,75 @@ test("workflow 归 fork 所有：保留改动及上游删除项，移除上游�
     "",
   );
   assert.equal(
-    await git(f.cwd, "show", `${result.candidateSha}:.github/workflows/ci.yml`),
-    "name: Windows 7 CI",
-  );
-  assert.equal(
-    await git(f.cwd, "show", `${result.candidateSha}:.github/workflows/preserve.yml`),
-    "name: Preserve this workflow",
+    await git(f.cwd, "show", `${result.candidateSha}:.github/workflows/fork.yml`),
+    "name: Trusted fork workflow",
   );
   await assert.rejects(
     git(f.cwd, "cat-file", "-e", `${result.candidateSha}:.github/workflows/upstream-only.yml`),
   );
+
+  const consumer = join(f.directory, "consumer");
+  await mkdir(consumer);
+  await git(consumer, "init", "-b", "main");
+  await git(consumer, "fetch", "--no-tags", f.cwd, f.controllerSha);
+  await git(consumer, "checkout", "--detach", "FETCH_HEAD");
+  await assert.rejects(git(consumer, "cat-file", "-e", `${result.candidateSha}^{commit}`));
+  await git(consumer, "bundle", "verify", f.bundlePath);
+  await git(consumer, "fetch", f.bundlePath, `${CANDIDATE_REF}:refs/heads/candidate`);
+  await git(consumer, "checkout", "--detach", "candidate");
+  assert.equal(await git(consumer, "rev-parse", "HEAD"), result.candidateSha);
   assert.equal(
-    await git(f.cwd, "show", `${result.candidateSha}:feature.txt`),
-    "upstream feature still belongs in the merge",
+    await readFile(join(consumer, "app.txt"), "utf8"),
+    "released application with Windows 7 adapter\n",
   );
+  await assert.rejects(stat(join(consumer, "maintenance-extra.txt")), { code: "ENOENT" });
 });
 
-test("同一 base/upstream 的候选 SHA 不随调用时的提交日期变化", async (t) => {
+test("相同controller、tag与patch得到确定性的单父候选", async (t) => {
   const f = await fixture(t);
-  await changeUpstream(f, () => put(f.cwd, "feature.txt", "deterministic feature\n"));
-  const authorDate = process.env.GIT_AUTHOR_DATE;
-  const committerDate = process.env.GIT_COMMITTER_DATE;
+  const originalAuthor = process.env.GIT_AUTHOR_DATE;
+  const originalCommitter = process.env.GIT_COMMITTER_DATE;
   try {
     process.env.GIT_AUTHOR_DATE = "2020-01-01T00:00:00Z";
     process.env.GIT_COMMITTER_DATE = "2020-01-01T00:00:00Z";
-    const first = await prepareUpstreamMerge({ cwd: f.cwd, upstreamRef, bundlePath: f.bundlePath });
-    await git(f.cwd, "checkout", "--detach", f.baseSha);
+    const first = await prepareReleaseCandidate(f);
+    await git(f.cwd, "reset", "--hard", f.controllerSha);
     process.env.GIT_AUTHOR_DATE = "2030-01-01T00:00:00Z";
     process.env.GIT_COMMITTER_DATE = "2030-01-01T00:00:00Z";
-    const second = await prepareUpstreamMerge({
-      cwd: f.cwd,
-      upstreamRef,
+    const second = await prepareReleaseCandidate({
+      ...f,
       bundlePath: join(f.directory, "second.bundle"),
     });
-    assert.equal(second.baseSha, first.baseSha);
-    assert.equal(second.upstreamSha, first.upstreamSha);
     assert.equal(second.candidateSha, first.candidateSha);
+    assert.equal(second.upstreamSha, first.upstreamSha);
+    assert.equal(second.patchSha256, first.patchSha256);
   } finally {
-    if (authorDate === undefined) delete process.env.GIT_AUTHOR_DATE;
-    else process.env.GIT_AUTHOR_DATE = authorDate;
-    if (committerDate === undefined) delete process.env.GIT_COMMITTER_DATE;
-    else process.env.GIT_COMMITTER_DATE = committerDate;
+    if (originalAuthor === undefined) delete process.env.GIT_AUTHOR_DATE;
+    else process.env.GIT_AUTHOR_DATE = originalAuthor;
+    if (originalCommitter === undefined) delete process.env.GIT_COMMITTER_DATE;
+    else process.env.GIT_COMMITTER_DATE = originalCommitter;
   }
+});
+
+test("补丁与新正式tag源码冲突必须停止，不能退回maintenance源码或产出bundle", async (t) => {
+  const f = await fixture(t);
+  await git(f.cwd, "checkout", "--detach", f.upstreamSha);
+  await put(f.cwd, "app.txt", "incompatible new upstream application\n");
+  const pkg = JSON.parse(await readFile(join(f.cwd, "package.json"), "utf8"));
+  await put(f.cwd, "package.json", JSON.stringify({ ...pkg, version: "1.2.4" }, null, 2) + "\n");
+  const newRelease = await commit(f.cwd, "incompatible new formal release");
+  await git(f.cwd, "tag", "v1.2.4", newRelease);
+  await git(f.cwd, "checkout", "--detach", f.controllerSha);
+  await assert.rejects(
+    prepareReleaseCandidate({ ...f, upstreamRef: "refs/tags/v1.2.4", upstreamTag: "v1.2.4" }),
+  );
+  assert.equal(await git(f.cwd, "rev-parse", "refs/heads/controller"), f.controllerSha);
+  await assert.rejects(stat(f.bundlePath), { code: "ENOENT" });
+});
+
+test("tag与package.version不符时拒绝候选和bundle", async (t) => {
+  const f = await fixture(t);
+  await assert.rejects(prepareReleaseCandidate({ ...f, upstreamTag: "v9.9.9" }), /version/i);
+  assert.equal(await git(f.cwd, "rev-parse", "refs/heads/controller"), f.controllerSha);
+  await assert.rejects(stat(f.bundlePath), { code: "ENOENT" });
 });
