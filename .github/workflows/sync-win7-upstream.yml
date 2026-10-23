@@ -1,0 +1,169 @@
+name: Sync Win7 with upstream
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: Win7 maintenance branch (empty uses the default branch)
+        type: string
+        default: ""
+  push:
+    branches: [codex/win7-desktop]
+    paths:
+      - .github/workflows/sync-win7-upstream.yml
+      - scripts/sync-win7-upstream.mjs
+      - scripts/publish-win7-upstream.mjs
+      - scripts/test/win7UpstreamSync.test.mjs
+permissions:
+  contents: read
+concurrency:
+  group: win7-upstream-${{ inputs.target_branch || (github.event_name == 'push' && github.ref_name) || github.event.repository.default_branch }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.repository == 'HandSonic/Zcode-CE'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+      baseSha: ${{ steps.sync.outputs.baseSha }}
+      upstreamSha: ${{ steps.sync.outputs.upstreamSha }}
+      candidateSha: ${{ steps.sync.outputs.candidateSha }}
+      baseBranch: ${{ steps.sync.outputs.baseBranch }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          package-manager-cache: false
+      - name: Prepare merge candidate without publishing it
+        id: sync
+        run: node scripts/sync-win7-upstream.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SYNC_BASE_BRANCH: ${{ inputs.target_branch || (github.event_name == 'push' && github.ref_name) || github.event.repository.default_branch }}
+      - uses: actions/upload-artifact@v4
+        if: steps.sync.outputs.changed == 'true'
+        with:
+          name: win7-upstream-candidate
+          path: .tmp/win7-upstream.bundle
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+  verify:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.baseSha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: win7-upstream-candidate
+          path: .tmp
+      - name: Load exact candidate
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidateSha }}
+        run: |
+          git fetch .tmp/win7-upstream.bundle refs/heads/win7-upstream-candidate
+          test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
+          git checkout --detach "$CANDIDATE"
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+      - run: pnpm lint
+      - run: pnpm fmt:check
+      - run: pnpm test
+      - run: pnpm architecture:check --changed
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.baseSha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: win7-upstream-candidate
+          path: .tmp
+      - name: Load exact candidate
+        shell: bash
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidateSha }}
+        run: |
+          git fetch .tmp/win7-upstream.bundle refs/heads/win7-upstream-candidate
+          test "$(git rev-parse FETCH_HEAD)" = "$CANDIDATE"
+          git checkout --detach "$CANDIDATE"
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build Win7 installer
+        run: pnpm bundle:desktop:win7
+        env:
+          ZCODE_ENV: production
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+      - name: Verify final package
+        shell: pwsh
+        run: |
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          & './packages/desktop/dist-win7/win-unpacked/ZCode-CE.exe' "$PWD/scripts/smoke-win7-desktop.cjs"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZCode-CE-win7-upstream-experimental
+          path: packages/desktop/dist-win7/*-win7.exe
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: [prepare, verify, build]
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # 控制代码来自触发该运行的可信提交，绝不 checkout 候选后执行其脚本。
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          package-manager-cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: win7-upstream-candidate
+          path: .tmp
+      - name: Publish validated update PR
+        run: node scripts/publish-win7-upstream.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SYNC_BASE_SHA: ${{ needs.prepare.outputs.baseSha }}
+          SYNC_UPSTREAM_SHA: ${{ needs.prepare.outputs.upstreamSha }}
+          SYNC_CANDIDATE_SHA: ${{ needs.prepare.outputs.candidateSha }}
+          SYNC_BASE_BRANCH: ${{ needs.prepare.outputs.baseBranch }}
